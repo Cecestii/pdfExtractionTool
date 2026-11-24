@@ -14,15 +14,11 @@ Supporta esportazione in formato standard **GFM** o ottimizzata per **Obsidian**
 
 ```text
 Converter/
-├── pipeline.py                 # Motore principale di conversione OCR / VLM
-├── fix_existing_markdown.py     # Script di utility per pulizia Markdown e fix link immagini
+├── pipeline.py                 # Motore unificato di conversione e riparazione
 ├── requirements.txt            # Dipendenze Python minime
-├── PROJECT_CONTEXT.md          # Registro e convenzioni operative del progetto
 ├── .gitignore                  # Esclusione automatica di output, venv e cache
 ├── tests/
 │   └── test_converter.py       # Test unitari automatici
-├── .antigravity/
-│   └── instructions.md         # Istruzioni operative per l'agente
 ├── README.md                   # Guida in inglese
 └── README.it.md                # Questa guida (Italiano)
 ```
@@ -71,14 +67,22 @@ python pipeline.py "documento.pdf" --format obsidian
 python pipeline.py "documento.pdf" 1 15
 ```
 
-### 4. Tabella dei parametri disponibili
+### 4. Modalità Riparazione e Normalizzazione
+Per normalizzare estensioni immagini, correggere link orfani e ripulire tag Markdown in una cartella di output già esistente:
+```bash
+python pipeline.py --repair output_markdown/
+```
+
+### 5. Tabella dei parametri disponibili
 | Parametro | Default | Descrizione |
 |---|---|---|
+| `pdf` | posizionale | Percorso del file PDF da elaborare |
 | `--workers`, `-w` | `2` | Numero di thread paralleli per le chiamate VLM |
 | `--timeout` | `90` | Timeout in secondi per singola richiesta API |
 | `--retries` | `2` | Tentativi di retry automatico con backoff esponenziale su errore |
 | `--format` | `gfm` | Formato di output Markdown: `gfm` o `obsidian` |
 | `--ignore-text` | `""` | Testi addizionali separati da virgola da filtrare nei footer |
+| `--repair` | `None` | Ripara e normalizza file Markdown ed estensioni immagini in una cartella |
 | `--dpi` | `140` | Risoluzione di rendering delle pagine |
 | `--max-dim` | `1280` | Dimensione massima lato lungo in pixel (ottimizza token visivi) |
 | `--model` | `qwen3-vl-8b-instruct` | ID del modello su LM Studio |

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import unittest
 from pathlib import Path
@@ -17,8 +19,8 @@ from pipeline import (
     clean_markdown_fences,
     convert_to_obsidian_callouts,
     get_processed_pages,
+    fix_image_links,
 )
-from fix_existing_markdown import fix_image_links
 
 
 class TestConverterPipeline(unittest.TestCase):

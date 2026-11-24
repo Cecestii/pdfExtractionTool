@@ -54,5 +54,6 @@ Thumbs.db
 *.swp
 *.swo
 
-# Local Antigravity conversation traces
-.antigravity/logs/
+# Local agent configuration & logs
+.antigravity/
+PROJECT_CONTEXT.md

@@ -7,15 +7,22 @@ import hashlib
 import io
 import os
 import re
+import shutil
 import sys
 import threading
 import time
 from pathlib import Path
 
-import fitz  # PyMuPDF
-from openai import OpenAI
-from PIL import Image
-from tqdm import tqdm
+try:
+    import fitz  # PyMuPDF
+    from openai import OpenAI
+    from PIL import Image
+    from tqdm import tqdm
+except ImportError:
+    fitz = None
+    OpenAI = None
+    Image = None
+    tqdm = None
 
 # ---------------- CONFIGURAZIONE PREDEFINITA ----------------
 DEFAULT_LM_STUDIO_URL = os.environ.get("LM_STUDIO_URL", "http://localhost:1234/v1")
@@ -59,7 +66,6 @@ HASH_LOCK = threading.Lock()
 
 def clean_markdown_fences(text: str) -> str:
     """Rimuove eventuali blocchi di pensiero (<think>...</think>) e wrapper di codice spuri (```markdown) generati dal VLM."""
-    # Rimuove tag think/reasoning generati da modelli con catena di pensiero nativa
     text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
     lines = text.strip().splitlines()
     if not lines:
@@ -99,6 +105,91 @@ def convert_to_obsidian_callouts(text: str) -> str:
     return text
 
 
+def fix_image_links(chunk: str, images_dir: Path) -> str:
+    """Risolve o converte i link a figure inesistenti nel Markdown."""
+    def replacer(match):
+        alt_text = match.group(1)
+        link_path = match.group(2)
+        full_path = images_dir.parent / link_path
+        if full_path.exists():
+            return match.group(0)
+
+        p_match = re.search(r"pag_(\d+)_", link_path)
+        if p_match:
+            p_num = p_match.group(1)
+            real_imgs = sorted(images_dir.glob(f"pag_{p_num}_fig_*.png"))
+            if real_imgs:
+                return f"![{alt_text}](images/{real_imgs[0].name})"
+            else:
+                return f"*{alt_text}*"
+        return f"*{alt_text}*"
+
+    return re.sub(r"\!\[(.*?)\]\((images/[^\)]+)\)", replacer, chunk)
+
+
+def repair_markdown_directory(target_path: Path) -> None:
+    """
+    Riparazione e normalizzazione di una cartella Markdown/immagini esistente:
+    sincronizza file JPEG in PNG, aggiorna estensioni e link orfani e crea backup .bak.
+    """
+    if Image is None:
+        print("Errore: modulo Pillow mancante. Installa le dipendenze con: pip install -r requirements.txt")
+        return
+
+    if not target_path.exists():
+        print(f"Errore: il percorso '{target_path}' non esiste.")
+        return
+
+    subdirs = [target_path] if (target_path / "images").exists() else [d for d in target_path.iterdir() if d.is_dir()]
+
+    print("=" * 65)
+    print(f"Avvio riparazione per: {target_path}")
+    print("=" * 65)
+
+    for item in sorted(subdirs):
+        images_dir = item / "images"
+        if images_dir.exists():
+            for img_file in list(images_dir.glob("*.jpeg")) + list(images_dir.glob("*.jpg")):
+                target_png = img_file.with_suffix(".png")
+                if not target_png.exists():
+                    try:
+                        with Image.open(img_file) as pil_img:
+                            if pil_img.mode in ("CMYK", "P"):
+                                pil_img = pil_img.convert("RGB")
+                            pil_img.save(target_png, format="PNG")
+                    except Exception as e:
+                        print(f"  [!] Errore conversione immagine {img_file.name}: {e}")
+
+        for md_file in item.glob("*.md"):
+            if md_file.name.endswith(".bak"):
+                continue
+
+            bak_path = md_file.with_suffix(".md.bak")
+            if not bak_path.exists():
+                shutil.copy2(md_file, bak_path)
+
+            content = md_file.read_text(encoding="utf-8", errors="ignore")
+            page_chunks = re.split(r"(<!--\s*PAGE\s+\d+(?:\s+FAILED)?\s*-->)", content, flags=re.IGNORECASE)
+
+            new_chunks = []
+            for chunk in page_chunks:
+                if re.match(r"^<!--\s*PAGE\s+\d+(?:\s+FAILED)?\s*-->$", chunk.strip(), flags=re.IGNORECASE):
+                    new_chunks.append(f"\n\n{chunk.strip()}\n\n")
+                else:
+                    cleaned = clean_markdown_fences(chunk)
+                    if cleaned:
+                        cleaned = re.sub(r"(\!\[.*?\]\(images/pag_\d+_fig_[a-zA-Z0-9_-]+)\.(?:jpeg|jpg)\)", r"\1.png)", cleaned)
+                        if images_dir.exists():
+                            cleaned = fix_image_links(cleaned, images_dir)
+                        new_chunks.append(cleaned)
+
+            final_text = "".join(new_chunks).strip() + "\n"
+            md_file.write_text(final_text, encoding="utf-8")
+            print(f"✓ File riparato e sincronizzato: {md_file.name}")
+
+    print("\n✓ Riparazione completata con successo.")
+
+
 def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) -> list[str]:
     """
     Estrae le immagini raster dalla pagina, deduplica loghi e sfondi con hash SHA-256
@@ -114,11 +205,9 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
         base_image = page.parent.extract_image(xref)
         image_bytes = base_image["image"]
 
-        # Filtra miniature trascurabili (< 50px)
         if base_image["width"] < 50 or base_image["height"] < 50:
             continue
 
-        # Filtro hash thread-safe per evitare loghi ateneo o elementi ripetuti del master slide
         img_hash = hashlib.sha256(image_bytes).hexdigest()
         with HASH_LOCK:
             if img_hash in SEEN_HASHES:
@@ -146,7 +235,6 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
         saved_images.append(file_name)
         valid_img_idx += 1
 
-    # Fallback per disegni/schemi vettoriali (forme native PowerPoint/Keynote senza bitmap)
     if not saved_images:
         drawings = page.get_drawings()
         pw, ph = page.rect.width, page.rect.height
@@ -405,7 +493,7 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description="Estrae testo, formule LaTeX e immagini da slide PDF usando Qwen 3-VL (8B) via LM Studio."
     )
-    parser.add_argument("pdf", type=str, help="Percorso del file PDF da elaborare.")
+    parser.add_argument("pdf", type=str, nargs="?", default=None, help="Percorso del file PDF da elaborare.")
     parser.add_argument("start", type=int, nargs="?", default=None, help="Pagina iniziale (opzionale).")
     parser.add_argument("end", type=int, nargs="?", default=None, help="Pagina finale (opzionale).")
     parser.add_argument("--start-page", type=int, dest="flag_start", default=None, help="Pagina iniziale.")
@@ -417,17 +505,31 @@ def parse_arguments():
     parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Tentativi di retry su errore API (default: 2).")
     parser.add_argument("--format", type=str, choices=["gfm", "obsidian"], default="gfm", help="Formato Markdown output: 'gfm' o 'obsidian' (callout nativi).")
     parser.add_argument("--ignore-text", type=str, default="", help="Testi o parole chiave addizionali da ignorare nei footer/header (separati da virgola).")
+    parser.add_argument("--repair", type=str, default=None, metavar="PATH", help="Ripara file Markdown ed estensioni immagini in una cartella di output.")
     parser.add_argument("--url", type=str, default=DEFAULT_LM_STUDIO_URL, help="URL endpoint OpenAI/LM Studio.")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_ID, help="Nome modello (default: qwen3-vl-8b-instruct).")
     parser.add_argument("--force", action="store_true", help="Rielabora anche le pagine già presenti nel file di output.")
 
-    return parser.parse_args()
+    return parser, parser.parse_args()
 
 
 def main():
-    start_wall_time = time.time()
-    args = parse_arguments()
+    parser, args = parse_arguments()
 
+    if args.repair:
+        repair_markdown_directory(Path(args.repair))
+        sys.exit(0)
+
+    if not args.pdf:
+        parser.print_help()
+        sys.exit(1)
+
+    if any(m is None for m in (fitz, OpenAI, Image, tqdm)):
+        print("Errore: dipendenze mancanti. Installa le dipendenze con:")
+        print("  pip install -r requirements.txt")
+        sys.exit(1)
+
+    start_wall_time = time.time()
     pdf_path = Path(args.pdf)
     if not pdf_path.exists():
         print(f"Errore: il file PDF '{pdf_path}' non esiste.")

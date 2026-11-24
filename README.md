@@ -14,15 +14,11 @@ Supports both standard **GFM** output and **Obsidian**-optimized formatting with
 
 ```text
 Converter/
-├── pipeline.py                 # Core OCR / VLM conversion engine
-├── fix_existing_markdown.py     # Post-processing script for markdown cleanup & image link fixes
+├── pipeline.py                 # Unified conversion & repair engine
 ├── requirements.txt            # Minimal Python dependencies
-├── PROJECT_CONTEXT.md          # Internal conventions and project status log
 ├── .gitignore                  # Automated exclusions for outputs, venvs, and cache
 ├── tests/
 │   └── test_converter.py       # Automated unit tests
-├── .antigravity/
-│   └── instructions.md         # Autonomous agent operational guide
 ├── README.md                   # This guide (English)
 └── README.it.md                # Italian documentation
 ```
@@ -71,14 +67,22 @@ python pipeline.py "path/to/document.pdf" --format obsidian
 python pipeline.py "path/to/document.pdf" 1 15
 ```
 
-### 4. CLI Arguments Reference
+### 4. Post-Processing & Repair Mode
+Normalize image extensions, repair orphan links, and clean markdown tags in an existing output folder:
+```bash
+python pipeline.py --repair output_markdown/
+```
+
+### 5. CLI Arguments Reference
 | Argument | Default | Description |
 |---|---|---|
+| `pdf` | positional | Path to the PDF file to convert |
 | `--workers`, `-w` | `2` | Number of concurrent worker threads |
 | `--timeout` | `90` | API request timeout in seconds |
 | `--retries` | `2` | Automatic retries with exponential backoff on failure |
 | `--format` | `gfm` | Output markdown dialect: `gfm` or `obsidian` |
 | `--ignore-text` | `""` | Comma-separated custom text patterns to remove from headers/footers |
+| `--repair` | `None` | Repair and normalize existing Markdown / images in a folder |
 | `--dpi` | `140` | Page rasterization resolution |
 | `--max-dim` | `1280` | Maximum pixel dimension (reduces visual token count & accelerates inference) |
 | `--model` | `qwen3-vl-8b-instruct` | VLM model identifier in LM Studio |
@@ -93,7 +97,7 @@ Converted outputs are created inside `output_markdown/<pdf_name>/`:
 - `<pdf_name>_estratto.md`: Final formatted Markdown document.
 - `images/`: High-resolution figures and vector schematics in PNG with SHA-256 deduplication.
 
-### Key Features
+### Key Architecture Features
 - **In-Memory Rendering**: Page previews are converted in RAM using `io.BytesIO`, preventing unnecessary SSD disk wear.
 - **Smart Resume**: Interrupted runs automatically pick up exactly where they left off, retrying any previously failed pages without reprocessing completed ones.
 - **Ordered Concurrent Streaming**: Pages are processed in parallel using thread pools but appended sequentially to maintain strict document order.
