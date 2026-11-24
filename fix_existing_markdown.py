@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import io
 import os
 import re
@@ -46,15 +48,12 @@ def clean_page_content(page_text: str) -> str:
     filtered_lines = []
     for line in lines:
         stripped = line.strip()
-        # Elimina blocchi wrapper ```markdown o ```md sparsi
         if stripped in ("```markdown", "```md"):
             continue
-        # Elimina righe di chiusura ``` solitarie se non precedute da un blocco di codice reale
         if any(pat.match(stripped) for pat in DEPT_PATTERNS):
             continue
         filtered_lines.append(line)
 
-    # Se la prima o ultima riga è ```, rimuovila
     if filtered_lines and filtered_lines[0].strip() == "```":
         filtered_lines = filtered_lines[1:]
     if filtered_lines and filtered_lines[-1].strip() == "```":
@@ -72,11 +71,9 @@ def fix_image_links(chunk: str, images_dir: Path) -> str:
         if full_path.exists():
             return match.group(0)
 
-        # Cerca numero di pagina nel link
         p_match = re.search(r"pag_(\d+)_", link_path)
         if p_match:
             p_num = p_match.group(1)
-            # Cerca figure reali esistenti su disco per questa pagina
             real_imgs = sorted(images_dir.glob(f"pag_{p_num}_fig_*.png"))
             if real_imgs:
                 return f"![{alt_text}](images/{real_imgs[0].name})"
@@ -90,7 +87,6 @@ def fix_markdown_file(md_path: Path):
     print(f"\nElaborazione file: {md_path}")
     images_dir = md_path.parent / "images"
 
-    # Backup
     bak_path = md_path.with_suffix(".md.bak")
     if not bak_path.exists():
         shutil.copy2(md_path, bak_path)
@@ -98,7 +94,6 @@ def fix_markdown_file(md_path: Path):
 
     content = md_path.read_text(encoding="utf-8", errors="ignore")
 
-    # Splittiamo per commenti <!-- PAGE X --> o <!-- PAGE X FAILED -->
     page_chunks = re.split(r"(<!--\s*PAGE\s+\d+(?:\s+FAILED)?\s*-->)", content, flags=re.IGNORECASE)
 
     new_chunks = []
@@ -108,9 +103,7 @@ def fix_markdown_file(md_path: Path):
         else:
             cleaned = clean_page_content(chunk)
             if cleaned:
-                # 1. Normalizza estensioni (supporta anche suffissi alfanumerici es. pag_20_fig_1a)
                 cleaned = re.sub(r"(\!\[.*?\]\(images/pag_\d+_fig_[a-zA-Z0-9_-]+)\.(?:jpeg|jpg)\)", r"\1.png)", cleaned)
-                # 2. Risolvi eventuali link orfani
                 if images_dir.exists():
                     cleaned = fix_image_links(cleaned, images_dir)
                 new_chunks.append(cleaned)

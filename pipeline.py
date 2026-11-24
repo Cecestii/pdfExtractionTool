@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import base64
 import concurrent.futures
@@ -7,6 +9,7 @@ import os
 import re
 import sys
 import threading
+import time
 from pathlib import Path
 
 import fitz  # PyMuPDF
@@ -21,6 +24,13 @@ DEFAULT_DPI_RENDER = 140
 DEFAULT_MAX_DIM = 1280  # Tetto massimo pixel per ridurre i visual token (~50% più veloce)
 DEFAULT_WORKERS = 2     # Ottimizzato per 16GB Mac con 2 slot paralleli su LM Studio
 DEFAULT_TIMEOUT = 90    # Timeout in secondi per le chiamate API verso LM Studio
+DEFAULT_RETRIES = 2     # Numero massimo di tentativi automatici su errore temporaneo
+DEFAULT_IGNORE_PATTERNS = [
+    "University of Brescia",
+    "TecMec",
+    "Department of Mechanical and Industrial Engineering",
+    "Dept. of Mechanical",
+]
 # ------------------------------------------------------------
 
 SYSTEM_PROMPT = """Sei un ingegnere meccanico e un trascrittore tecnico di altissima precisione.
@@ -66,6 +76,29 @@ def clean_markdown_fences(text: str) -> str:
     return "\n".join(filtered).strip()
 
 
+def convert_to_obsidian_callouts(text: str) -> str:
+    """Trasforma blocchi di citazione standard in callout nativi per Obsidian."""
+    text = re.sub(
+        r"^>\s*\*\*Dettagli\s+tecnici\s+figura:?\*\*",
+        "> [!info] Dettagli tecnici figura",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^>\s*\*\*Schema\s+grafico:?\*\*",
+        "> [!example] Schema grafico",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^>\s*\*\*Nota:?\*\*",
+        "> [!note] Nota",
+        text,
+        flags=re.MULTILINE | re.IGNORECASE,
+    )
+    return text
+
+
 def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) -> list[str]:
     """
     Estrae le immagini raster dalla pagina, deduplica loghi e sfondi con hash SHA-256
@@ -92,18 +125,15 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
                 continue
             SEEN_HASHES.add(img_hash)
 
-        # Standardizziamo SEMPRE in .png per evitare discrepanze nei link Markdown
         file_name = f"pag_{page_num}_fig_{valid_img_idx}.png"
         image_path = images_dir / file_name
 
         try:
-            # Conversione in PNG via Pillow (gestione corretta di trasparenze e canali)
             with Image.open(io.BytesIO(image_bytes)) as pil_img:
                 if pil_img.mode in ("CMYK", "P"):
                     pil_img = pil_img.convert("RGB")
                 pil_img.save(image_path, format="PNG")
         except Exception:
-            # Fallback tramite Pixmap nativa di PyMuPDF se Pillow incontra formati rari
             try:
                 pix = fitz.Pixmap(page.parent, xref)
                 if pix.n >= 5:
@@ -114,7 +144,6 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
                 continue
 
         saved_images.append(file_name)
-        print(f"  [+] Estratta figura: {file_name} ({base_image['width']}x{base_image['height']})")
         valid_img_idx += 1
 
     # Fallback per disegni/schemi vettoriali (forme native PowerPoint/Keynote senza bitmap)
@@ -125,7 +154,6 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
         valid_shapes = 0
         for d in drawings:
             r = d["rect"]
-            # Ignora sfondi a tutta pagina o la barra laterale di ateneo (x <= 85)
             if r.width >= pw * 0.95 and r.height >= ph * 0.95:
                 continue
             if r.x1 <= 85:
@@ -148,7 +176,6 @@ def extract_individual_images(page: fitz.Page, page_num: int, images_dir: Path) 
             image_path = images_dir / file_name
             pix.save(str(image_path))
             saved_images.append(file_name)
-            print(f"  [+] Ritagliato schema vettoriale: {file_name} ({pix.width}x{pix.height})")
 
     return saved_images
 
@@ -182,19 +209,21 @@ def process_page(
     dpi: int,
     max_dim: int,
     timeout: int = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    output_format: str = "gfm",
+    ignore_patterns: list[str] | None = None,
 ) -> str:
-    """Elabora una singola pagina PDF inviandola al VLM con supporto testo nativo."""
+    """Elabora una singola pagina PDF inviandola al VLM con retry automatico ed eventuale export Obsidian."""
     page_num = page_idx + 1
     page = doc.load_page(page_idx)
 
-    # Cartella immagini per questo documento
+    patterns = ignore_patterns if ignore_patterns is not None else DEFAULT_IGNORE_PATTERNS
+
     images_dir = book_dir / "images"
     extracted_imgs = extract_individual_images(page, page_num, images_dir)
 
-    # Render in RAM (zero I/O su SSD)
     base64_img = render_full_page_base64(page, dpi, max_dim)
 
-    # Costruzione dinamica dell'elenco figure disponibili nel prompt
     if extracted_imgs:
         figure_list_str = "\n".join(f"- images/{fn}" for fn in extracted_imgs)
         figure_clause = (
@@ -210,15 +239,12 @@ def process_page(
             "descrivili a parole nel testo o con un blocco '> **Schema grafico:**'."
         )
 
-    # Iniezione del testo nativo del PDF come guida rapida per l'inferenza
     raw_text = page.get_text("text").strip()
     if raw_text:
-        # Pulisce eventuali footer ricorrenti dal testo nativo prima di passarlo
         clean_raw_lines = [
             line.strip()
             for line in raw_text.splitlines()
-            if line.strip()
-            and not any(p in line for p in ["University of Brescia", "TecMec", "Department of Mechanical"])
+            if line.strip() and not any(p.lower() in line.lower() for p in patterns)
         ]
         clean_raw_text = "\n".join(clean_raw_lines)
         if clean_raw_text:
@@ -233,39 +259,52 @@ def process_page(
 
     system_content = SYSTEM_PROMPT + figure_clause + text_hint
 
-    response = client.chat.completions.create(
-        model=model_id,
-        messages=[
-            {"role": "system", "content": system_content},
-            {
-                "role": "user",
-                "content": [
+    last_error = None
+    for attempt in range(1 + retries):
+        try:
+            response = client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "system", "content": system_content},
                     {
-                        "type": "text",
-                        "text": f"Trascrivi integralmente e con rigore ingegneristico la slide {page_num}:",
-                    },
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{base64_img}"},
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"Trascrivi integralmente e con rigore ingegneristico la slide {page_num}:",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/png;base64,{base64_img}"},
+                            },
+                        ],
                     },
                 ],
-            },
-        ],
-        temperature=0.0,  # Greedy search per massima velocità e determinismo
-        max_tokens=1500,  # Ampio margine per formule complesse ed elenchi dettagliati
-        timeout=timeout,
-    )
-    raw_md = response.choices[0].message.content or ""
-    clean_md = clean_markdown_fences(raw_md)
+                temperature=0.0,
+                max_tokens=1500,
+                timeout=timeout,
+            )
+            raw_md = response.choices[0].message.content or ""
+            clean_md = clean_markdown_fences(raw_md)
 
-    # Garanzia di inserimento: verifica che nessuna figura estratta venga omessa
-    missing_imgs = [fn for fn in extracted_imgs if f"images/{fn}" not in clean_md]
-    if missing_imgs:
-        clean_md += "\n\n### Schemi e figure della slide:\n"
-        for m_img in missing_imgs:
-            clean_md += f"\n![Figura tecnica](images/{m_img})\n"
+            missing_imgs = [fn for fn in extracted_imgs if f"images/{fn}" not in clean_md]
+            if missing_imgs:
+                clean_md += "\n\n### Schemi e figure della slide:\n"
+                for m_img in missing_imgs:
+                    clean_md += f"\n![Figura tecnica](images/{m_img})\n"
 
-    return clean_md
+            if output_format == "obsidian":
+                clean_md = convert_to_obsidian_callouts(clean_md)
+
+            return clean_md
+        except Exception as e:
+            last_error = e
+            if attempt < retries:
+                time.sleep(2 ** attempt)
+            else:
+                raise last_error
+
+    return f"> **[ERRORE ELABORAZIONE PAGINA {page_num}]**: {last_error}"
 
 
 def worker_task(
@@ -277,12 +316,27 @@ def worker_task(
     dpi: int,
     max_dim: int,
     timeout: int = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    output_format: str = "gfm",
+    ignore_patterns: list[str] | None = None,
 ) -> tuple[int, str]:
     """Task eseguito in parallelo dal ThreadPool: apre un proprio handle fitz thread-safe."""
     page_num = page_idx + 1
     doc = fitz.open(pdf_path)
     try:
-        res = process_page(doc, page_idx, book_dir, client, model_id, dpi, max_dim, timeout)
+        res = process_page(
+            doc,
+            page_idx,
+            book_dir,
+            client,
+            model_id,
+            dpi,
+            max_dim,
+            timeout,
+            retries,
+            output_format,
+            ignore_patterns,
+        )
         return page_num, res
     finally:
         doc.close()
@@ -297,7 +351,6 @@ def get_processed_pages(md_path: Path) -> set[int]:
         return set()
     try:
         content = md_path.read_text(encoding="utf-8", errors="ignore")
-        # Riconosce solo <!-- PAGE 12 --> ed esclude <!-- PAGE 12 FAILED -->
         matches = re.findall(r"<!--\s*PAGE\s+(\d+)\s*-->", content, re.IGNORECASE)
         return {int(m) for m in matches}
     except Exception:
@@ -332,7 +385,6 @@ def check_lm_studio_connection(url: str, model_id: str, client: OpenAI) -> str:
         if model_id in avail_ids:
             print(f"✓ Connessione a LM Studio OK (Modello: {model_id})")
             return model_id
-        # Fallback intelligente su varianti del nome modello caricate
         matching = [m_id for m_id in avail_ids if "qwen3" in m_id.lower() or "vl" in m_id.lower()]
         if matching:
             print(f"[i] Modello esatto '{model_id}' non nell'elenco, selezionato automaticamente '{matching[0]}'")
@@ -362,6 +414,9 @@ def parse_arguments():
     parser.add_argument("--max-dim", type=int, default=DEFAULT_MAX_DIM, help="Tetto massimo pixel lato lungo (default: 1280).")
     parser.add_argument("--workers", "-w", type=int, default=DEFAULT_WORKERS, help="Numero richieste concorrenti (default: 2 per 16GB Mac).")
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT, help="Timeout in secondi per richiesta API (default: 90).")
+    parser.add_argument("--retries", type=int, default=DEFAULT_RETRIES, help="Tentativi di retry su errore API (default: 2).")
+    parser.add_argument("--format", type=str, choices=["gfm", "obsidian"], default="gfm", help="Formato Markdown output: 'gfm' o 'obsidian' (callout nativi).")
+    parser.add_argument("--ignore-text", type=str, default="", help="Testi o parole chiave addizionali da ignorare nei footer/header (separati da virgola).")
     parser.add_argument("--url", type=str, default=DEFAULT_LM_STUDIO_URL, help="URL endpoint OpenAI/LM Studio.")
     parser.add_argument("--model", type=str, default=DEFAULT_MODEL_ID, help="Nome modello (default: qwen3-vl-8b-instruct).")
     parser.add_argument("--force", action="store_true", help="Rielabora anche le pagine già presenti nel file di output.")
@@ -370,6 +425,7 @@ def parse_arguments():
 
 
 def main():
+    start_wall_time = time.time()
     args = parse_arguments()
 
     pdf_path = Path(args.pdf)
@@ -381,7 +437,6 @@ def main():
     total_pages = len(doc_probe)
     doc_probe.close()
 
-    # Risoluzione pagine inizio / fine
     start_p = args.flag_start if args.flag_start is not None else (args.start if args.start is not None else 1)
     end_p = args.flag_end if args.flag_end is not None else (args.end if args.end is not None else total_pages)
 
@@ -392,27 +447,29 @@ def main():
         print(f"Errore: pagina iniziale ({start_p}) maggiore della finale ({end_p}).")
         sys.exit(1)
 
-    # Risoluzione automatica URL attivo (es. porta 1234 vs 1235)
+    ignore_list = list(DEFAULT_IGNORE_PATTERNS)
+    if args.ignore_text:
+        custom_patterns = [p.strip() for p in args.ignore_text.split(",") if p.strip()]
+        ignore_list.extend(custom_patterns)
+
     active_url = resolve_active_lm_studio_url(args.url)
     client = OpenAI(base_url=active_url, api_key="lm-studio")
 
     print("=" * 65)
     print(f"Elaborazione PDF: {pdf_path.name}")
     print(f"Pagine da elaborare: da {start_p} a {end_p} (totale: {end_p - start_p + 1} su {total_pages})")
-    print(f"Concorrenza: {args.workers} workers | Max Dimensione: {args.max_dim}px | DPI: {args.dpi} | Timeout: {args.timeout}s")
+    print(f"Concorrenza: {args.workers} workers | Formato: {args.format.upper()} | Retry: {args.retries}")
+    print(f"DPI: {args.dpi} | Max Dim: {args.max_dim}px | Timeout: {args.timeout}s")
     print(f"Modello: {args.model} | Endpoint: {active_url}")
     print("=" * 65)
 
-    # Verifica connessione
     model_to_use = check_lm_studio_connection(active_url, args.model, client)
 
-    # Sottocartella dedicata con il nome del PDF
     book_folder_name = pdf_path.stem
     book_dir = Path("./output_markdown") / book_folder_name
     book_dir.mkdir(parents=True, exist_ok=True)
     out_file = book_dir / f"{book_folder_name}_estratto.md"
 
-    # Gestione Resume automatico
     processed_pages = get_processed_pages(out_file)
     if processed_pages and not args.force:
         print(f"ℹ Trovate {len(processed_pages)} pagine già presenti in '{out_file.name}'.")
@@ -420,7 +477,6 @@ def main():
 
     print(f"\nDestinazione: {out_file}\n")
 
-    # Lista delle pagine effettive da calcolare
     pages_to_process = [
         p + 1 for p in range(start_p - 1, end_p)
         if (p + 1 not in processed_pages) or args.force
@@ -436,9 +492,8 @@ def main():
     pages_done = 0
     pages_failed = 0
 
-    # Sliding window con ThreadPoolExecutor: scrittura strettamente ordinata su file
     active_futures = {}
-    completed_results = {}  # {page_num: (is_success, markdown_text)}
+    completed_results = {}
     page_iter = iter(pages_to_process)
     next_page_idx = 0
     next_page_to_write = pages_to_process[next_page_idx]
@@ -452,7 +507,6 @@ def main():
 
     with open(out_file, "a", encoding="utf-8") as md_out:
         with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as executor:
-            # Pre-carica fino a (workers * 2) compiti in parallelo
             for _ in range(min(args.workers * 2, len(pages_to_process))):
                 p_num = next(page_iter, None)
                 if p_num is not None:
@@ -466,22 +520,23 @@ def main():
                         args.dpi,
                         args.max_dim,
                         args.timeout,
+                        args.retries,
+                        args.format,
+                        ignore_list,
                     )
                     active_futures[fut] = p_num
 
             try:
                 while active_futures or (next_page_to_write in completed_results):
-                    # Se la prossima pagina consecutiva è pronta nel dizionario, scrivila subito
                     if next_page_to_write in completed_results:
                         is_success, res_md = completed_results.pop(next_page_to_write)
                         if is_success:
                             md_out.write(f"\n\n<!-- PAGE {next_page_to_write} -->\n\n")
                             md_out.write(res_md)
                             md_out.flush()
-                            pbar.write(f"✓ [Salvata] Pagina {next_page_to_write}/{total_pages} scritta con successo.")
+                            pbar.write(f"✓ [Salvata] Pagina {next_page_to_write}/{total_pages} completata.")
                             pages_done += 1
                         else:
-                            # Marcatore FAILED: non blocca la sequenza, ma consente al resume futuro di ritentarla
                             md_out.write(f"\n\n<!-- PAGE {next_page_to_write} FAILED -->\n\n")
                             md_out.write(res_md)
                             md_out.flush()
@@ -490,7 +545,6 @@ def main():
 
                         pbar.update(1)
 
-                        # Avanza alla successiva pagina richiesta nella lista
                         next_page_idx += 1
                         if next_page_idx < len(pages_to_process):
                             next_page_to_write = pages_to_process[next_page_idx]
@@ -498,7 +552,6 @@ def main():
                             next_page_to_write = None
                         continue
 
-                    # Altrimenti attendi il primo thread che completa
                     done, _ = concurrent.futures.wait(
                         active_futures.keys(),
                         return_when=concurrent.futures.FIRST_COMPLETED,
@@ -514,7 +567,6 @@ def main():
                             pbar.write(f"✗ Errore su pagina {p_num}: {e}")
                             completed_results[p_num] = (False, f"> **[ERRORE ELABORAZIONE PAGINA {p_num}]**: {e}")
 
-                        # Sottometti una nuova pagina se disponibile
                         next_p = next(page_iter, None)
                         if next_p is not None:
                             new_fut = executor.submit(
@@ -527,6 +579,9 @@ def main():
                                 args.dpi,
                                 args.max_dim,
                                 args.timeout,
+                                args.retries,
+                                args.format,
+                                ignore_list,
                             )
                             active_futures[new_fut] = next_p
 
@@ -537,9 +592,19 @@ def main():
             finally:
                 pbar.close()
 
+    elapsed = time.time() - start_wall_time
+    sec_per_page = (elapsed / pages_done) if pages_done > 0 else 0
+    pages_per_min = (pages_done / (elapsed / 60.0)) if elapsed > 0 else 0
+
     print("\n" + "=" * 65)
-    print(f"Riepilogo: {pages_done} elaborate con successo, {pages_skipped} saltate, {pages_failed} errori.")
-    print(f"File salvato in: {out_file}")
+    print("📊 RIEPILOGO ELABORAZIONE")
+    print(f"- Pagine elaborate con successo: {pages_done}")
+    print(f"- Pagine saltate (già presenti): {pages_skipped}")
+    print(f"- Pagine con errori:            {pages_failed}")
+    print(f"- Tempo totale trascorso:       {elapsed:.1f}s")
+    if pages_done > 0:
+        print(f"- Velocità media:               {sec_per_page:.1f} s/pagina (~{pages_per_min:.1f} pag/min)")
+    print(f"- File di output:               {out_file}")
     print("=" * 65)
 
 

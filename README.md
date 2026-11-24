@@ -2,6 +2,8 @@
 
 Pipeline Python autonoma ad alta fedeltà per convertire slide e dispense PDF in formato **GitHub-Flavored Markdown** con formule LaTeX, tabelle e figure estratte in alta definizione, interfacciandosi con un modello Vision-Language (VLM) in locale su **LM Studio**.
 
+Supporta esportazione in formato standard **GFM** o ottimizzata per **Obsidian** con callout nativi.
+
 ---
 
 ## 📁 Struttura della Cartella
@@ -13,6 +15,8 @@ Converter/
 ├── requirements.txt            # Dipendenze Python minime
 ├── PROJECT_CONTEXT.md          # Registro e convenzioni operative del progetto
 ├── .gitignore                  # Esclusione automatica di output, venv e cache
+├── tests/
+│   └── test_converter.py       # Test unitari automatici
 ├── .antigravity/
 │   └── instructions.md         # Istruzioni operative per l'agente
 └── README.md                   # Questa guida
@@ -22,12 +26,12 @@ Converter/
 
 ## ⚙️ Prerequisiti
 
-1. **Python 3.10+** installato.
+1. **Python 3.10+** (o Python 3.9 con standard library).
 2. **LM Studio** aperto con un modello VLM caricato (es. `Qwen3-VL-8B-Instruct` o `qwen2.5-vl-7b-instruct`) e Local Server avviato su porta `1234` (o `1235`).
 
 ---
 
-## 🚀 Installazione
+## 🚀 Installazione Rapida
 
 ```bash
 # 1. Creazione ambiente virtuale
@@ -47,26 +51,34 @@ pip install -r requirements.txt
 
 ## 📖 Utilizzo
 
-### Conversione intero documento
+### 1. Conversione standard (GFM)
 ```bash
 python pipeline.py "documento.pdf"
 ```
 
-### Conversione intervallo di pagine
+### 2. Conversione con formato per Obsidian (callout nativi)
+```bash
+python pipeline.py "documento.pdf" --format obsidian
+```
+
+### 3. Conversione di un intervallo di pagine
 ```bash
 python pipeline.py "documento.pdf" 1 15
 ```
 
-### Parametri opzionali
+### 4. Tabella dei parametri disponibili
 | Parametro | Default | Descrizione |
 |---|---|---|
-| `--workers`, `-w` | `2` | Numero di worker paralleli |
+| `--workers`, `-w` | `2` | Numero di thread paralleli per le chiamate VLM |
 | `--timeout` | `90` | Timeout in secondi per singola richiesta API |
+| `--retries` | `2` | Tentativi di retry automatico con backoff esponenziale su errore |
+| `--format` | `gfm` | Formato di output Markdown: `gfm` o `obsidian` |
+| `--ignore-text` | `""` | Testi addizionali separati da virgola da filtrare nei footer |
 | `--dpi` | `140` | Risoluzione di rendering delle pagine |
-| `--max-dim` | `1280` | Limite pixel lato lungo (riduce token e latenza) |
-| `--model` | `qwen3-vl-8b-instruct` | ID modello caricato su LM Studio |
-| `--url` | `http://localhost:1234/v1` | Endpoint API compatibile OpenAI |
-| `--force` | disattivato | Rielabora tutte le pagine anche se già salvate |
+| `--max-dim` | `1280` | Dimensione massima lato lungo in pixel (ottimizza token visivi) |
+| `--model` | `qwen3-vl-8b-instruct` | ID del modello su LM Studio |
+| `--url` | `http://localhost:1234/v1` | Endpoint API compatibile OpenAI / LM Studio |
+| `--force` | disattivato | Rielabora tutte le pagine anche se già presenti |
 
 ---
 
@@ -74,6 +86,16 @@ python pipeline.py "documento.pdf" 1 15
 
 I file convertiti vengono posizionati in `output_markdown/<nome_pdf>/`:
 - `<nome_pdf>_estratto.md`: file Markdown formattato finale.
-- `images/`: figure e schemi estratti in formato PNG.
+- `images/`: figure e schemi estratti in formato PNG con deduplica SHA-256.
 
-Grazie al **Resume automatico**, in caso di interruzione lo script riprenderà esattamente dalle pagine non ancora elaborate o fallite.
+A fine esecuzione lo script stampa un riepilogo prestazionale con tempo totale, velocità media per pagina e pagine al minuto.
+
+---
+
+## 🧪 Esecuzione dei Test
+
+I test unitari non richiedono un server LM Studio attivo e possono essere eseguiti in qualsiasi momento:
+
+```bash
+python3 -m unittest discover -s tests -p "test_*.py" -v
+```
