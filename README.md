@@ -1,100 +1,109 @@
+<p align="center">
+  <b>English</b> | <a href="README.it.md">Italiano</a>
+</p>
+
 # PDF to Markdown Converter (VLM Pipeline)
 
-Pipeline Python autonoma ad alta fedeltà per convertire slide e dispense PDF in formato **GitHub-Flavored Markdown** con formule LaTeX, tabelle e figure estratte in alta definizione, interfacciandosi con un modello Vision-Language (VLM) in locale su **LM Studio**.
+A high-fidelity Python pipeline designed to convert complex PDF slides and lecture handouts into clean **GitHub-Flavored Markdown (GFM)**. It preserves mathematical LaTeX formulas ($...$, $$...$$), structured tables, and high-definition extracted figures by interfacing with local Vision-Language Models (VLMs) via **LM Studio**.
 
-Supporta esportazione in formato standard **GFM** o ottimizzata per **Obsidian** con callout nativi.
+Supports both standard **GFM** output and **Obsidian**-optimized formatting with native callouts.
 
 ---
 
-## 📁 Struttura della Cartella
+## 📁 Repository Structure
 
 ```text
 Converter/
-├── pipeline.py                 # Motore principale di conversione OCR / VLM
-├── fix_existing_markdown.py     # Script di utility per pulizia Markdown e fix link immagini
-├── requirements.txt            # Dipendenze Python minime
-├── PROJECT_CONTEXT.md          # Registro e convenzioni operative del progetto
-├── .gitignore                  # Esclusione automatica di output, venv e cache
+├── pipeline.py                 # Core OCR / VLM conversion engine
+├── fix_existing_markdown.py     # Post-processing script for markdown cleanup & image link fixes
+├── requirements.txt            # Minimal Python dependencies
+├── PROJECT_CONTEXT.md          # Internal conventions and project status log
+├── .gitignore                  # Automated exclusions for outputs, venvs, and cache
 ├── tests/
-│   └── test_converter.py       # Test unitari automatici
+│   └── test_converter.py       # Automated unit tests
 ├── .antigravity/
-│   └── instructions.md         # Istruzioni operative per l'agente
-└── README.md                   # Questa guida
+│   └── instructions.md         # Autonomous agent operational guide
+├── README.md                   # This guide (English)
+└── README.it.md                # Italian documentation
 ```
 
 ---
 
-## ⚙️ Prerequisiti
+## ⚙️ Prerequisites
 
-1. **Python 3.10+** (o Python 3.9 con standard library).
-2. **LM Studio** aperto con un modello VLM caricato (es. `Qwen3-VL-8B-Instruct` o `qwen2.5-vl-7b-instruct`) e Local Server avviato su porta `1234` (o `1235`).
+1. **Python 3.10+** (or Python 3.9 using the standard library).
+2. **LM Studio** running locally with a Vision-Language Model loaded (e.g., `Qwen3-VL-8B-Instruct` or `qwen2.5-vl-7b-instruct`) with the Local Server started on port `1234` (or fallback `1235`).
 
 ---
 
-## 🚀 Installazione Rapida
+## 🚀 Quick Start
 
 ```bash
-# 1. Creazione ambiente virtuale
+# 1. Create a virtual environment
 python3 -m venv venv
 
-# 2. Attivazione
-# Su macOS/Linux:
+# 2. Activate the environment
+# On macOS/Linux:
 source venv/bin/activate
-# Su Windows:
+# On Windows:
 # .\venv\Scripts\Activate.ps1
 
-# 3. Installazione dipendenze
+# 3. Install dependencies
 pip install -r requirements.txt
 ```
 
 ---
 
-## 📖 Utilizzo
+## 📖 Usage
 
-### 1. Conversione standard (GFM)
+### 1. Full Document Conversion (Default GFM)
 ```bash
-python pipeline.py "documento.pdf"
+python pipeline.py "path/to/document.pdf"
 ```
 
-### 2. Conversione con formato per Obsidian (callout nativi)
+### 2. Obsidian Format (with Native Callouts)
 ```bash
-python pipeline.py "documento.pdf" --format obsidian
+python pipeline.py "path/to/document.pdf" --format obsidian
 ```
 
-### 3. Conversione di un intervallo di pagine
+### 3. Page Range Conversion
 ```bash
-python pipeline.py "documento.pdf" 1 15
+python pipeline.py "path/to/document.pdf" 1 15
 ```
 
-### 4. Tabella dei parametri disponibili
-| Parametro | Default | Descrizione |
+### 4. CLI Arguments Reference
+| Argument | Default | Description |
 |---|---|---|
-| `--workers`, `-w` | `2` | Numero di thread paralleli per le chiamate VLM |
-| `--timeout` | `90` | Timeout in secondi per singola richiesta API |
-| `--retries` | `2` | Tentativi di retry automatico con backoff esponenziale su errore |
-| `--format` | `gfm` | Formato di output Markdown: `gfm` o `obsidian` |
-| `--ignore-text` | `""` | Testi addizionali separati da virgola da filtrare nei footer |
-| `--dpi` | `140` | Risoluzione di rendering delle pagine |
-| `--max-dim` | `1280` | Dimensione massima lato lungo in pixel (ottimizza token visivi) |
-| `--model` | `qwen3-vl-8b-instruct` | ID del modello su LM Studio |
-| `--url` | `http://localhost:1234/v1` | Endpoint API compatibile OpenAI / LM Studio |
-| `--force` | disattivato | Rielabora tutte le pagine anche se già presenti |
+| `--workers`, `-w` | `2` | Number of concurrent worker threads |
+| `--timeout` | `90` | API request timeout in seconds |
+| `--retries` | `2` | Automatic retries with exponential backoff on failure |
+| `--format` | `gfm` | Output markdown dialect: `gfm` or `obsidian` |
+| `--ignore-text` | `""` | Comma-separated custom text patterns to remove from headers/footers |
+| `--dpi` | `140` | Page rasterization resolution |
+| `--max-dim` | `1280` | Maximum pixel dimension (reduces visual token count & accelerates inference) |
+| `--model` | `qwen3-vl-8b-instruct` | VLM model identifier in LM Studio |
+| `--url` | `http://localhost:1234/v1` | OpenAI-compatible endpoint URL |
+| `--force` | disabled | Reprocess all pages even if already present in output file |
 
 ---
 
-## 📂 Output Generato
+## 📂 Output Structure
 
-I file convertiti vengono posizionati in `output_markdown/<nome_pdf>/`:
-- `<nome_pdf>_estratto.md`: file Markdown formattato finale.
-- `images/`: figure e schemi estratti in formato PNG con deduplica SHA-256.
+Converted outputs are created inside `output_markdown/<pdf_name>/`:
+- `<pdf_name>_estratto.md`: Final formatted Markdown document.
+- `images/`: High-resolution figures and vector schematics in PNG with SHA-256 deduplication.
 
-A fine esecuzione lo script stampa un riepilogo prestazionale con tempo totale, velocità media per pagina e pagine al minuto.
+### Key Features
+- **In-Memory Rendering**: Page previews are converted in RAM using `io.BytesIO`, preventing unnecessary SSD disk wear.
+- **Smart Resume**: Interrupted runs automatically pick up exactly where they left off, retrying any previously failed pages without reprocessing completed ones.
+- **Ordered Concurrent Streaming**: Pages are processed in parallel using thread pools but appended sequentially to maintain strict document order.
+- **Performance Summary**: Prints execution metrics including elapsed time, seconds per page, and processing throughput (pages/min).
 
 ---
 
-## 🧪 Esecuzione dei Test
+## 🧪 Running Tests
 
-I test unitari non richiedono un server LM Studio attivo e possono essere eseguiti in qualsiasi momento:
+Unit tests do not require an active LM Studio instance and can be executed anytime:
 
 ```bash
 python3 -m unittest discover -s tests -p "test_*.py" -v
