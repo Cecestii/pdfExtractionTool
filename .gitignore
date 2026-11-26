@@ -36,8 +36,10 @@ venv.bak/
 # Project output and generated artifacts
 output_markdown/
 temp_cache/
+.seen_hashes
 *.bak
 *.md.bak
+*.md.tmp
 
 # Operating System files
 .DS_Store
